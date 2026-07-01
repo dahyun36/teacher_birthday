@@ -795,14 +795,19 @@ const StorageAdapter = (function(){
   const hasClaudeStorage = !!(window.storage && typeof window.storage.get === 'function');
 
   let fbDb = null;
+  let fbInitError = null;
   if(!hasClaudeStorage){
     try{
       if(typeof firebase !== 'undefined' && firebase.initializeApp){
         firebase.initializeApp(FIREBASE_CONFIG);
         fbDb = firebase.firestore();
+      }else{
+        fbInitError = 'firebase SDK가 로드되지 않았어요 (스크립트 차단 가능성)';
       }
-    }catch(e){ fbDb = null; }
+    }catch(e){ fbDb = null; fbInitError = e; console.error('[StorageAdapter] Firebase init 실패:', e); }
   }
+  const backend = hasClaudeStorage ? 'claude' : (fbDb ? 'firebase' : 'local');
+  console.log('[StorageAdapter] backend =', backend, fbInitError ? ('(firebase 실패: ' + fbInitError + ')') : '');
 
   async function get(key){
     if(hasClaudeStorage){
@@ -812,7 +817,7 @@ const StorageAdapter = (function(){
       try{
         const doc = await fbDb.collection('kv_store').doc(key).get();
         return doc.exists ? {key, value: doc.data().value} : null;
-      }catch(e){ /* fall through to localStorage */ }
+      }catch(e){ console.error('[StorageAdapter] firestore get 실패:', e); }
     }
     try{
       const raw = localStorage.getItem(key);
@@ -826,10 +831,10 @@ const StorageAdapter = (function(){
     if(fbDb){
       try{
         await fbDb.collection('kv_store').doc(key).set({key, value});
-        return {key, value};
-      }catch(e){ /* fall through to localStorage */ }
+        return {key, value, backend:'firebase'};
+      }catch(e){ console.error('[StorageAdapter] firestore set 실패:', e); }
     }
-    try{ localStorage.setItem(key, value); return {key, value}; }catch(e){ return null; }
+    try{ localStorage.setItem(key, value); return {key, value, backend:'local'}; }catch(e){ return null; }
   }
   async function del(key){
     if(hasClaudeStorage){
@@ -839,7 +844,7 @@ const StorageAdapter = (function(){
       try{
         await fbDb.collection('kv_store').doc(key).delete();
         return {key, deleted:true};
-      }catch(e){ /* fall through to localStorage */ }
+      }catch(e){ console.error('[StorageAdapter] firestore delete 실패:', e); }
     }
     try{ localStorage.removeItem(key); return {key, deleted:true}; }catch(e){ return null; }
   }
@@ -852,7 +857,7 @@ const StorageAdapter = (function(){
         const snap = await fbDb.collection('kv_store').get();
         const keys = snap.docs.map(d=>d.id).filter(k=>k.indexOf(prefix)===0);
         return {keys, prefix};
-      }catch(e){ /* fall through to localStorage */ }
+      }catch(e){ console.error('[StorageAdapter] firestore list 실패:', e); }
     }
     try{
       const keys = [];
@@ -863,7 +868,29 @@ const StorageAdapter = (function(){
       return {keys, prefix};
     }catch(e){ return null; }
   }
-  return {get, set, delete: del, list, shared: hasClaudeStorage};
+  // prefix로 묶인 항목들을 한 번의 네트워크 요청으로 값까지 함께 가져옴 (list+get 반복 호출로 인한 이중 다운로드 방지)
+  async function getAllByPrefix(prefix){
+    if(fbDb){
+      try{
+        const snap = await fbDb.collection('kv_store').get();
+        return snap.docs
+          .filter(d=>d.id.indexOf(prefix)===0)
+          .map(d=>({key:d.id, value:d.data().value}));
+      }catch(e){ /* fall through */ }
+    }
+    // Claude storage / localStorage: list 후 get 반복 (원격 KV라 별도 최적화 API가 없음)
+    const listRes = await list(prefix);
+    const keys = (listRes && listRes.keys) ? listRes.keys : [];
+    const out = [];
+    for(const k of keys){
+      try{
+        const r = await get(k);
+        if(r) out.push(r);
+      }catch(e){}
+    }
+    return out;
+  }
+  return {get, set, delete: del, list, getAllByPrefix, shared: hasClaudeStorage, backend};
 })();
 
 // ---------- rolling paper ----------
@@ -925,7 +952,8 @@ async function addNote(name, message){
     const result = await StorageAdapter.set(STORAGE_KEY, JSON.stringify(updated));
     if(!result){ throw new Error('save failed'); }
     renderNotes(updated);
-    statusEl.textContent = '메시지가 남겨졌어요 :)';
+    const shared = (StorageAdapter.backend === 'claude') || (result.backend === 'firebase');
+    statusEl.textContent = shared ? '메시지가 남겨졌어요, 다같이 볼 수 있어요 :)' : '이 브라우저에만 저장됐어요 (공유 안 됨)';
   }catch(err){
     statusEl.textContent = '저장에 실패했어요. 다시 시도해주세요.';
   }finally{
@@ -1107,19 +1135,12 @@ function compressImage(file, maxW, quality){
 async function loadGallery(){
   gGrid.innerHTML = '<div class="g-empty">불러오는 중...</div>';
   try{
-    const listRes = await StorageAdapter.list(G_PREFIX);
-    const keys = (listRes && listRes.keys) ? listRes.keys : [];
-    if(keys.length === 0){
+    const rows = await StorageAdapter.getAllByPrefix(G_PREFIX);
+    if(!rows || rows.length === 0){
       gGrid.innerHTML = '<div class="g-empty">아직 사진이 없어요, 첫 사진을 올려보세요</div>';
       return;
     }
-    const items = [];
-    for(const k of keys){
-      try{
-        const r = await StorageAdapter.get(k);
-        if(r){ items.push(Object.assign({key:k}, JSON.parse(r.value))); }
-      }catch(e){}
-    }
+    const items = rows.map(r=> Object.assign({key:r.key}, JSON.parse(r.value)));
     items.sort((a,b)=> (b.createdAt||0) - (a.createdAt||0));
     renderGallery(items);
   }catch(err){
@@ -1157,7 +1178,7 @@ gInput.addEventListener('change', async (e)=>{
   for(const file of files){
     if(!file.type.startsWith('image/')) continue;
     try{
-      const dataUrl = await compressImage(file, 1000, 0.72);
+      const dataUrl = await compressImage(file, 700, 0.6);
       const id = (crypto.randomUUID ? crypto.randomUUID() : (Date.now() + '-' + Math.random()));
       await StorageAdapter.set(G_PREFIX + id, JSON.stringify({dataUrl, createdAt: Date.now()}));
     }catch(err){ /* skip failed file */ }
