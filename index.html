@@ -561,7 +561,16 @@
 
   /* ---------- gallery tab ---------- */
   .g-topline{ font-size:16px; margin:-30px 0 30px; color:var(--ink-soft); }
-  .gallery-toolbar{ display:flex; justify-content:center; margin-bottom:30px; }
+  .gallery-toolbar{ display:flex; justify-content:center; margin-bottom:14px; }
+  .gallery-link-row{
+    display:flex; justify-content:center; gap:8px; margin-bottom:10px; flex-wrap:wrap;
+  }
+  .gallery-link-row input{
+    font-family:'Noto Sans KR'; font-size:13.5px;
+    border:1.5px solid #E8DCCF; border-radius:12px;
+    padding:10px 14px; width:min(320px, 60vw); background:#fff; color:var(--ink);
+  }
+  .gallery-link-row .upload-label{ padding:10px 18px; font-size:13.5px; }
   .upload-label{
     font-family:'Gaegu'; font-weight:700; font-size:15px;
     border:2px dashed var(--ink); border-radius:16px;
@@ -579,7 +588,7 @@
     aspect-ratio:1/1; box-shadow:0 8px 16px -8px rgba(74,50,69,.3);
     background:#eee;
   }
-  .g-card img{ width:100%; height:100%; object-fit:cover; display:block; }
+  .g-card img, .g-card video, .g-card iframe{ width:100%; height:100%; object-fit:cover; display:block; border:none; }
   .g-del{
     position:absolute; top:6px; right:6px; width:26px; height:26px; border-radius:50%;
     border:none; background:rgba(74,50,69,.72); color:#fff; font-size:12px; cursor:pointer;
@@ -588,6 +597,10 @@
   .g-empty{
     grid-column:1/-1; text-align:center; padding:50px 0;
     font-family:'Gamja Flower'; font-size:17px; color:var(--ink-soft);
+  }
+  .g-status{
+    text-align:center; font-size:12.5px; color:var(--ink-soft);
+    margin:-20px 0 28px; min-height:16px;
   }
 </style>
 <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-app-compat.js"></script>
@@ -749,9 +762,14 @@
     <div class="script g-topline reveal">다 같이 채우고, 다 같이 정리해요</div>
 
     <div class="gallery-toolbar reveal">
-      <label class="upload-label" for="gallery-file-input">+ 사진 추가</label>
-      <input type="file" id="gallery-file-input" accept="image/*" multiple>
+      <label class="upload-label" for="gallery-file-input">+ 사진/영상 추가</label>
+      <input type="file" id="gallery-file-input" accept="image/*,video/*" multiple>
     </div>
+    <div class="gallery-link-row reveal">
+      <input type="text" id="g-drive-input" placeholder="구글 드라이브 링크 붙여넣기">
+      <button id="g-drive-add" class="upload-label" type="button">+ 링크 추가</button>
+    </div>
+    <div class="g-status" id="g-status"></div>
 
     <div class="g-grid" id="g-grid">
       <div class="g-empty">불러오는 중...</div>
@@ -1308,6 +1326,14 @@ loadNotes();
 const G_PREFIX = 'usergallery:photo:';
 const gGrid = document.getElementById('g-grid');
 const gInput = document.getElementById('gallery-file-input');
+const gStatus = document.getElementById('g-status');
+const MAX_VIDEO_MB = 12; // 저장소 용량 보호를 위한 영상 크기 제한
+
+function flashGStatus(msg){
+  if(!gStatus) return;
+  gStatus.textContent = msg;
+  setTimeout(()=>{ if(gStatus.textContent === msg) gStatus.textContent = ''; }, 3500);
+}
 
 function compressImage(file, maxW, quality){
   return new Promise((resolve, reject)=>{
@@ -1330,12 +1356,21 @@ function compressImage(file, maxW, quality){
   });
 }
 
+function readAsDataUrl(file){
+  return new Promise((resolve, reject)=>{
+    const reader = new FileReader();
+    reader.onload = (e)=> resolve(e.target.result);
+    reader.onerror = reject;
+    reader.readAsDataURL(file);
+  });
+}
+
 async function loadGallery(){
   gGrid.innerHTML = '<div class="g-empty">불러오는 중...</div>';
   try{
     const rows = await StorageAdapter.getAllByPrefix(G_PREFIX);
     if(!rows || rows.length === 0){
-      gGrid.innerHTML = '<div class="g-empty">아직 사진이 없어요, 첫 사진을 올려보세요</div>';
+      gGrid.innerHTML = '<div class="g-empty">아직 사진/영상이 없어요, 첫 게시물을 올려보세요</div>';
       return;
     }
     const items = rows.map(r=> Object.assign({key:r.key}, JSON.parse(r.value)));
@@ -1348,12 +1383,20 @@ async function loadGallery(){
 
 function renderGallery(items){
   if(items.length === 0){
-    gGrid.innerHTML = '<div class="g-empty">아직 사진이 없어요, 첫 사진을 올려보세요</div>';
+    gGrid.innerHTML = '<div class="g-empty">아직 사진/영상이 없어요, 첫 게시물을 올려보세요</div>';
     return;
   }
-  gGrid.innerHTML = items.map(it=>
-    '<div class="g-card" data-key="' + it.key + '"><img src="' + it.dataUrl + '"><button class="g-del">✕</button></div>'
-  ).join('');
+  gGrid.innerHTML = items.map(it=>{
+    let media;
+    if(it.type === 'video'){
+      media = '<video src="' + it.dataUrl + '" muted loop playsinline autoplay></video>';
+    }else if(it.type === 'drive'){
+      media = '<iframe src="https://drive.google.com/file/d/' + it.fileId + '/preview" allow="autoplay"></iframe>';
+    }else{
+      media = '<img src="' + it.dataUrl + '">';
+    }
+    return '<div class="g-card" data-key="' + it.key + '">' + media + '<button class="g-del">✕</button></div>';
+  }).join('');
   gGrid.querySelectorAll('.g-card').forEach(card=>{
     card.querySelector('.g-del').addEventListener('click', async ()=>{
       const key = card.dataset.key;
@@ -1362,7 +1405,7 @@ function renderGallery(items){
         await StorageAdapter.delete(key);
         card.remove();
         if(!gGrid.querySelector('.g-card')){
-          gGrid.innerHTML = '<div class="g-empty">아직 사진이 없어요, 첫 사진을 올려보세요</div>';
+          gGrid.innerHTML = '<div class="g-empty">아직 사진/영상이 없어요, 첫 게시물을 올려보세요</div>';
         }
       }catch(e){
         card.style.opacity = '1';
@@ -1371,17 +1414,65 @@ function renderGallery(items){
   });
 }
 
+function extractDriveFileId(url){
+  const patterns = [/\/d\/([a-zA-Z0-9_-]{10,})/, /[?&]id=([a-zA-Z0-9_-]{10,})/];
+  for(const p of patterns){
+    const m = url.match(p);
+    if(m) return m[1];
+  }
+  return null;
+}
+
+const gDriveInput = document.getElementById('g-drive-input');
+const gDriveAdd = document.getElementById('g-drive-add');
+
+async function addDriveLink(){
+  const url = gDriveInput.value.trim();
+  if(!url){ return; }
+  const fileId = extractDriveFileId(url);
+  if(!fileId){
+    flashGStatus('올바른 구글 드라이브 링크가 아니에요');
+    return;
+  }
+  gDriveAdd.disabled = true;
+  try{
+    const id = (crypto.randomUUID ? crypto.randomUUID() : (Date.now() + '-' + Math.random()));
+    const result = await StorageAdapter.set(G_PREFIX + id, JSON.stringify({type:'drive', fileId, createdAt: Date.now()}));
+    if(!result){ throw new Error('save failed'); }
+    gDriveInput.value = '';
+    flashGStatus('드라이브 영상이 추가됐어요 (공유 설정이 "링크가 있는 모든 사용자"인지 확인해주세요)');
+    loadGallery();
+  }catch(err){
+    flashGStatus('추가에 실패했어요. 다시 시도해주세요.');
+  }finally{
+    gDriveAdd.disabled = false;
+  }
+}
+gDriveAdd.addEventListener('click', addDriveLink);
+gDriveInput.addEventListener('keydown', (e)=>{ if(e.key === 'Enter') addDriveLink(); });
+
 gInput.addEventListener('change', async (e)=>{
   const files = Array.from(e.target.files || []);
+  let skipped = 0;
   for(const file of files){
-    if(!file.type.startsWith('image/')) continue;
     try{
-      const dataUrl = await compressImage(file, 700, 0.6);
-      const id = (crypto.randomUUID ? crypto.randomUUID() : (Date.now() + '-' + Math.random()));
-      await StorageAdapter.set(G_PREFIX + id, JSON.stringify({dataUrl, createdAt: Date.now()}));
-    }catch(err){ /* skip failed file */ }
+      if(file.type.startsWith('image/')){
+        const dataUrl = await compressImage(file, 700, 0.6);
+        const id = (crypto.randomUUID ? crypto.randomUUID() : (Date.now() + '-' + Math.random()));
+        await StorageAdapter.set(G_PREFIX + id, JSON.stringify({type:'image', dataUrl, createdAt: Date.now()}));
+      }else if(file.type.startsWith('video/')){
+        if(file.size > MAX_VIDEO_MB * 1024 * 1024){
+          skipped++;
+          continue;
+        }
+        const dataUrl = await readAsDataUrl(file);
+        const id = (crypto.randomUUID ? crypto.randomUUID() : (Date.now() + '-' + Math.random()));
+        await StorageAdapter.set(G_PREFIX + id, JSON.stringify({type:'video', dataUrl, createdAt: Date.now()}));
+      }
+    }catch(err){ skipped++; }
   }
   gInput.value = '';
+  if(skipped > 0){ flashGStatus('일부 영상은 용량(' + MAX_VIDEO_MB + 'MB) 초과로 업로드되지 않았어요'); }
   loadGallery();
 });
 </script>
