@@ -571,6 +571,8 @@
     font-family:'Gamja Flower'; font-size:17px; color:var(--ink-soft);
   }
 </style>
+<script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-app-compat.js"></script>
+<script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-firestore-compat.js"></script>
 </head>
 <body>
 
@@ -778,12 +780,39 @@ document.querySelectorAll('.reveal').forEach(el=>io.observe(el));
   else{ el.textContent = '7월 16일까지 D-' + diff; }
 })();
 
-// ---------- storage adapter (Claude storage → localStorage 폴백) ----------
+// ---------- storage adapter (Claude storage → Firebase → localStorage 폴백) ----------
+const FIREBASE_CONFIG = {
+  apiKey: "AIzaSyA8c4w2Et1wMT5EM_A7qBJO0RsIOIPurhg",
+  authDomain: "teacher-bday.firebaseapp.com",
+  projectId: "teacher-bday",
+  storageBucket: "teacher-bday.firebasestorage.app",
+  messagingSenderId: "17249754153",
+  appId: "1:17249754153:web:a19b3c6c24ea9be6f5d038",
+  measurementId: "G-J743BXHTJV"
+};
+
 const StorageAdapter = (function(){
   const hasClaudeStorage = !!(window.storage && typeof window.storage.get === 'function');
+
+  let fbDb = null;
+  if(!hasClaudeStorage){
+    try{
+      if(typeof firebase !== 'undefined' && firebase.initializeApp){
+        firebase.initializeApp(FIREBASE_CONFIG);
+        fbDb = firebase.firestore();
+      }
+    }catch(e){ fbDb = null; }
+  }
+
   async function get(key){
     if(hasClaudeStorage){
       try{ return await window.storage.get(key, true); }catch(e){ return null; }
+    }
+    if(fbDb){
+      try{
+        const doc = await fbDb.collection('kv_store').doc(key).get();
+        return doc.exists ? {key, value: doc.data().value} : null;
+      }catch(e){ /* fall through to localStorage */ }
     }
     try{
       const raw = localStorage.getItem(key);
@@ -794,17 +823,36 @@ const StorageAdapter = (function(){
     if(hasClaudeStorage){
       try{ return await window.storage.set(key, value, true); }catch(e){ return null; }
     }
+    if(fbDb){
+      try{
+        await fbDb.collection('kv_store').doc(key).set({key, value});
+        return {key, value};
+      }catch(e){ /* fall through to localStorage */ }
+    }
     try{ localStorage.setItem(key, value); return {key, value}; }catch(e){ return null; }
   }
   async function del(key){
     if(hasClaudeStorage){
       try{ return await window.storage.delete(key, true); }catch(e){ return null; }
     }
+    if(fbDb){
+      try{
+        await fbDb.collection('kv_store').doc(key).delete();
+        return {key, deleted:true};
+      }catch(e){ /* fall through to localStorage */ }
+    }
     try{ localStorage.removeItem(key); return {key, deleted:true}; }catch(e){ return null; }
   }
   async function list(prefix){
     if(hasClaudeStorage){
       try{ return await window.storage.list(prefix, true); }catch(e){ return null; }
+    }
+    if(fbDb){
+      try{
+        const snap = await fbDb.collection('kv_store').get();
+        const keys = snap.docs.map(d=>d.id).filter(k=>k.indexOf(prefix)===0);
+        return {keys, prefix};
+      }catch(e){ /* fall through to localStorage */ }
     }
     try{
       const keys = [];
