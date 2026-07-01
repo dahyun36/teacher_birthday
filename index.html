@@ -586,13 +586,24 @@
   .g-card{
     position:relative; border-radius:12px; overflow:hidden;
     aspect-ratio:1/1; box-shadow:0 8px 16px -8px rgba(74,50,69,.3);
-    background:#eee;
+    background:#eee; cursor:pointer;
+    transition:transform .25s ease, box-shadow .25s ease;
   }
-  .g-card img, .g-card video, .g-card iframe{ width:100%; height:100%; object-fit:cover; display:block; border:none; }
+  .g-card:hover{ transform:translateY(-3px) scale(1.02); box-shadow:0 14px 24px -10px rgba(74,50,69,.4); }
+  .g-card img, .g-card video, .g-card iframe{ width:100%; height:100%; object-fit:cover; display:block; border:none; pointer-events:none; }
+  .g-card .g-zoom-hint{
+    position:absolute; inset:0; display:flex; align-items:center; justify-content:center;
+    background:rgba(74,50,69,0); opacity:0; transition:opacity .2s ease, background .2s ease;
+  }
+  .g-card:hover .g-zoom-hint{ opacity:1; background:rgba(74,50,69,.18); }
+  .g-card .g-zoom-hint span{
+    width:36px; height:36px; border-radius:50%; background:rgba(255,251,243,.92);
+    display:flex; align-items:center; justify-content:center; font-size:16px; color:var(--ink);
+  }
   .g-del{
     position:absolute; top:6px; right:6px; width:26px; height:26px; border-radius:50%;
     border:none; background:rgba(74,50,69,.72); color:#fff; font-size:12px; cursor:pointer;
-    display:flex; align-items:center; justify-content:center;
+    display:flex; align-items:center; justify-content:center; z-index:2;
   }
   .g-empty{
     grid-column:1/-1; text-align:center; padding:50px 0;
@@ -601,6 +612,45 @@
   .g-status{
     text-align:center; font-size:12.5px; color:var(--ink-soft);
     margin:-20px 0 28px; min-height:16px;
+  }
+
+  /* ---------- lightbox ---------- */
+  .g-lightbox{
+    display:none;
+    position:fixed; inset:0; z-index:999;
+    background:rgba(20,14,18,.92);
+    align-items:center; justify-content:center;
+    padding:56px 20px;
+    animation:lbFadeIn .2s ease;
+  }
+  .g-lightbox.open{ display:flex; }
+  @keyframes lbFadeIn{ from{opacity:0;} to{opacity:1;} }
+  .g-lightbox-content{
+    max-width:min(920px,92vw); max-height:84vh;
+    display:flex; align-items:center; justify-content:center;
+  }
+  .g-lightbox-content img,
+  .g-lightbox-content video{
+    max-width:100%; max-height:84vh; width:auto; height:auto;
+    display:block; border-radius:10px; object-fit:contain;
+    box-shadow:0 24px 60px rgba(0,0,0,.5);
+    background:#000;
+  }
+  .g-lightbox-content iframe{
+    width:min(860px,88vw); height:min(70vh,484px);
+    border-radius:10px; box-shadow:0 24px 60px rgba(0,0,0,.5);
+    background:#000;
+  }
+  .g-lightbox-close{
+    position:absolute; top:16px; right:16px; width:44px; height:44px; border-radius:50%;
+    border:none; background:rgba(255,255,255,.14); color:#fff; font-size:20px; cursor:pointer;
+    display:flex; align-items:center; justify-content:center;
+    transition:background .2s ease, transform .2s ease;
+  }
+  .g-lightbox-close:hover{ background:rgba(255,255,255,.28); transform:scale(1.06); }
+  @media(max-width:600px){
+    .g-lightbox{ padding:70px 12px 24px; }
+    .g-lightbox-close{ top:14px; right:14px; }
   }
 </style>
 <script src="https://www.gstatic.com/firebasejs/10.13.2/firebase-app-compat.js"></script>
@@ -775,6 +825,11 @@
       <div class="g-empty">불러오는 중...</div>
     </div>
   </section>
+</div>
+
+<div id="g-lightbox" class="g-lightbox">
+  <button id="g-lightbox-close" class="g-lightbox-close" aria-label="닫기">✕</button>
+  <div class="g-lightbox-content" id="g-lightbox-content"></div>
 </div>
 
 <script>
@@ -1395,11 +1450,20 @@ function renderGallery(items){
     }else{
       media = '<img src="' + it.dataUrl + '">';
     }
-    return '<div class="g-card" data-key="' + it.key + '">' + media + '<button class="g-del">✕</button></div>';
+    return '<div class="g-card" data-key="' + it.key + '">' + media
+      + '<div class="g-zoom-hint"><span>⤢</span></div>'
+      + '<button class="g-del">✕</button></div>';
   }).join('');
   gGrid.querySelectorAll('.g-card').forEach(card=>{
-    card.querySelector('.g-del').addEventListener('click', async ()=>{
-      const key = card.dataset.key;
+    const key = card.dataset.key;
+    const item = items.find(i=> i.key === key);
+
+    card.addEventListener('click', ()=>{
+      if(item) openLightbox(item);
+    });
+
+    card.querySelector('.g-del').addEventListener('click', async (e)=>{
+      e.stopPropagation();
       card.style.opacity = '.4';
       try{
         await StorageAdapter.delete(key);
@@ -1413,6 +1477,39 @@ function renderGallery(items){
     });
   });
 }
+
+// ---------- lightbox (사진/영상 확대보기) ----------
+const gLightbox = document.getElementById('g-lightbox');
+const gLightboxContent = document.getElementById('g-lightbox-content');
+const gLightboxCloseBtn = document.getElementById('g-lightbox-close');
+
+function openLightbox(item){
+  let html;
+  if(item.type === 'video'){
+    html = '<video src="' + item.dataUrl + '" controls autoplay playsinline></video>';
+  }else if(item.type === 'drive'){
+    html = '<iframe src="https://drive.google.com/file/d/' + item.fileId + '/preview" allow="autoplay" allowfullscreen></iframe>';
+  }else{
+    html = '<img src="' + item.dataUrl + '" alt="추억 사진">';
+  }
+  gLightboxContent.innerHTML = html;
+  gLightbox.classList.add('open');
+  document.body.style.overflow = 'hidden';
+}
+
+function closeLightbox(){
+  gLightbox.classList.remove('open');
+  gLightboxContent.innerHTML = '';
+  document.body.style.overflow = '';
+}
+
+gLightboxCloseBtn.addEventListener('click', closeLightbox);
+gLightbox.addEventListener('click', (e)=>{
+  if(e.target === gLightbox) closeLightbox();
+});
+document.addEventListener('keydown', (e)=>{
+  if(e.key === 'Escape' && gLightbox.classList.contains('open')) closeLightbox();
+});
 
 function extractDriveFileId(url){
   const patterns = [/\/d\/([a-zA-Z0-9_-]{10,})/, /[?&]id=([a-zA-Z0-9_-]{10,})/];
